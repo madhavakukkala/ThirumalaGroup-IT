@@ -1,6 +1,7 @@
 /**
- * HP Ledger screen: renders the real page over an in-memory database (made-up loan only),
- * opens the account, takes a payment and checks what the screen shows. "Today" is fixed at 12 Nov 2026.
+ * HP Ledger screen (CD Ledger layout): renders the real page over an in-memory database (made-up
+ * loan only), opens the account, checks what it shows and takes payments with the three buttons.
+ * "Today" is fixed at 12 Nov 2026.
  */
 import { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
@@ -29,6 +30,7 @@ vi.mock('../components/finance/FinanceSmartCalendar', () => ({
   )
 }));
 vi.mock('../components/finance/FinancePrintPreview', () => ({ default: () => null }));
+vi.mock('../components/finance/CustomerFullDetails', () => ({ default: () => null }));
 
 import HPLedger from '../pages/finance/HPLedger';
 import { supabaseFinance } from '../lib/supabaseFinance';
@@ -38,32 +40,36 @@ import { supabaseFinance } from '../lib/supabaseFinance';
 let container: HTMLDivElement;
 let root: Root;
 
-const settle = async (ms = 30) => {
-  await act(async () => { await new Promise(r => setTimeout(r, ms)); });
-};
+const settle = async (ms = 30) => { await act(async () => { await new Promise(r => setTimeout(r, ms)); }); };
 const waitFor = async (check: () => boolean, label: string) => {
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 80; i++) {
     if (check()) return;
     await settle();
   }
-  throw new Error(`Timed out waiting for: ${label}\n${container.textContent?.slice(0, 600)}`);
+  throw new Error(`Timed out waiting for: ${label}\n${text().slice(0, 800)}`);
 };
-const text = () => container.textContent || '';
-const buttonWith = (t: string) => Array.from(container.querySelectorAll('button')).find(b => (b.textContent || '').includes(t)) as HTMLButtonElement;
+const text = () => (container.textContent || '').replace(/\s+/g, ' ');
+const buttonWith = (t: string) => Array.from(container.querySelectorAll('button')).find(b => (b.textContent || '').trim().includes(t)) as HTMLButtonElement;
+const amountInput = () => container.querySelector('input[placeholder="Enter "]') as HTMLInputElement;
 const typeInto = async (input: HTMLInputElement, value: string) => {
   await act(async () => {
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
-    setter.call(input, value);
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
 };
+const openAccount = async () => {
+  await waitFor(() => text().includes('All HP Loans') && text().includes('HP001'), 'loan list');
+  const row = Array.from(container.querySelectorAll('tr')).find(r => (r.textContent || '').includes('HP001')) as HTMLTableRowElement;
+  await act(async () => { row.click(); });
+  await waitFor(() => text().includes('A/C: HP001') && text().includes('Account Position'), 'account');
+};
 
-describe('HP Ledger screen', () => {
+describe('HP Ledger screen (CD Ledger layout)', () => {
   beforeEach(async () => {
     fake.db.seed({
-      finance_customers: [{ id: 'cust-1', name: 'TEST CUSTOMER', phone: '9000000000' }],
-      finance_loans: [], finance_transactions: [], finance_cd_ledger_entries: [], finance_dues: [],
-      finance_transaction_reviews: [], finance_edited_logs: []
+      finance_customers: [{ id: 'cust-1', name: 'TEST CUSTOMER', phone: '9000000000', partner_name: 'PARTNER A' }],
+      finance_loans: [], finance_transactions: [], finance_cd_ledger_entries: [], finance_dues: [], finance_photos: [],
+      finance_loan_documents: [], finance_documents_returned: [], finance_transaction_reviews: [], finance_edited_logs: []
     });
     // 1,00,000; 10 installments every 30 days; 3% + 0.75% per period; doc 1,000; loan date 1 Sep 2026
     const loan = await supabaseFinance.createLoan({
@@ -86,47 +92,74 @@ describe('HP Ledger screen', () => {
     container.remove();
   });
 
-  it('lists the account: 2 of 10 paid, principal 80,000, installment 3 is 12 days late', async () => {
-    await waitFor(() => text().includes('HP001'), 'account row');
-    expect(text()).toContain('2 / 10');
-    expect(text()).toContain('80,000.00');
-    // installment 3 due 31 Oct 2026, 12 days late on 12 Nov: 13,000 + 156 late interest + 39 penalty
-    expect(text()).toContain('13,195.00');
-    expect(text()).toContain('12 days late');
+  it('list: CD-style index with HP Number, borrower, phone, amount, status', async () => {
+    await waitFor(() => text().includes('All HP Loans'), 'list');
+    expect(text()).toContain('1 loan(s) in the system');
+    expect(text()).toContain('HP Number');
+    expect(text()).toContain('1,00,000');
+    expect(text()).toContain('ACTIVE');
   });
 
-  it('opens the account, shows the position and saves a payment with the right split', async () => {
-    await waitFor(() => text().includes('HP001'), 'account row');
-    await act(async () => { buttonWith('Open').click(); });
-    await waitFor(() => text().includes('HP Account: HP001'), 'drawer');
+  it('opened account: CD layout with HP figures', async () => {
+    await openAccount();
+    const t = text();
+    expect(t).toContain('Record: 1 of 1');
+    expect(t).toContain('Operator Action & Calculations');
+    expect(t).toContain('Installments2 of 10every 30 days');
+    expect(t).toContain('Rate / Penalty3.00% / 0.75%');
+    expect(t).toContain('Current Due Date31-Oct-26');
+    expect(t).toContain('Next Due Date30-Nov-26');
+    expect(t).toContain('Due Days12');
+    // Account Position on 12 Nov 2026
+    expect(t).toContain('Principal Bal.80,000.00');
+    expect(t).toContain('Today Due13,195.00');
+    expect(t).toContain('Late Interest156.00');
+    expect(t).toContain('Penalty39.00');
+    expect(t).toContain('Next Installment#4 due 30-Nov-26');
+    expect(t).toContain('Total to Regularize');
+    expect(t).toContain('84,395.00'); // Total for Close
+    // Tabs, Installments first
+    ['Installments', 'Ledger Statement', 'Interest History', 'Payment History', 'Edit History'].forEach(tab => expect(t).toContain(tab));
+    expect(t).toContain('Kept at disbursement');
+    expect(t).toContain('Overdue');
+    // Footer
+    expect(t).toContain('Total Credit');
+    ['Open Report', 'Receipt Print', 'NPA Close', 'Refresh', 'Excel'].forEach(b => expect(buttonWith(b)).toBeTruthy());
+  });
 
-    expect(text()).toContain('Installments Paid2 of 10');
-    // Total for Close on 12 Nov: 80,000 + 3,000 (installment 3) + 12 days of installment 4 (1,200) + 195 late
-    expect(text()).toContain('84,395.00');
-    expect(text()).toContain('Oldest unpaid installment is 12 days late');
+  it('buttons: Partial for less than due, Installment for the due amount, Close for Total for Close', async () => {
+    await openAccount();
+    await typeInto(amountInput(), '5000');
+    await waitFor(() => text().includes('Real-Time Payment Allocation'), 'allocation');
+    expect(buttonWith('Partial Payment').disabled).toBe(false);
+    expect(buttonWith('Installment Payment').disabled).toBe(true);
+    expect(buttonWith('Close Account').disabled).toBe(true);
 
-    const amount = container.querySelector('input[placeholder="0.00"]') as HTMLInputElement;
-    await typeInto(amount, '13195');
-    await waitFor(() => text().includes('Payment split'), 'split preview');
-    expect(text()).toContain('Penalty (HP Penalty)39.00');
-    expect(text()).toContain('Late interest (HP Interest)156.00');
-    expect(text()).toContain('Interest (HP Interest)3,000.00');
-    expect(text()).toContain('Principal10,000.00');
+    await typeInto(amountInput(), '84395');
+    await waitFor(() => text().includes('Closing Allocation Preview'), 'close preview');
+    expect(buttonWith('Close Account').disabled).toBe(false);
+    expect(buttonWith('Partial Payment').disabled).toBe(true);
 
-    await act(async () => { buttonWith('Save Payment').click(); });
+    await typeInto(amountInput(), '13195');
+    await waitFor(() => text().includes('Installment Allocation: #3'), 'installment preview');
+    expect(text()).toContain('Penalty: 39');
+    expect(text()).toContain('Late Int: 156');
+    expect(buttonWith('Installment Payment').disabled).toBe(false);
+    await act(async () => { buttonWith('Installment Payment').click(); });
     await waitFor(() => fake.db.tables.finance_transactions.some((t: any) => t.amount === 13195), 'receipt saved');
-    const saved = fake.db.tables.finance_transactions.find((t: any) => t.amount === 13195);
-    expect(saved.remarks).toMatch(/^HP Collection - RC\d+ \(Prin: 10000\.00, Interest: 3156\.00, Pen: 39\.00\)$/);
-    await waitFor(() => text().includes('Installments Paid3 of 10'), 'position refreshed');
+    await waitFor(() => text().includes('Installments3 of 10every'), 'refreshed');
+    expect(fake.db.tables.finance_transactions.find((t: any) => t.amount === 13195).remarks)
+      .toMatch(/^HP Collection - RC\d+ \(Prin: 10000\.00, Interest: 3156\.00, Pen: 39\.00\)$/);
   });
 
-  it('refuses an amount that would pay off the loan and points to Close Account', async () => {
-    await waitFor(() => text().includes('HP001'), 'account row');
-    await act(async () => { buttonWith('Open').click(); });
-    await waitFor(() => text().includes('HP Account: HP001'), 'drawer');
-    const amount = container.querySelector('input[placeholder="0.00"]') as HTMLInputElement;
-    await typeInto(amount, '83300');
-    await waitFor(() => text().includes('Use Close Account'), 'refusal');
-    expect(buttonWith('Save Payment').disabled).toBe(true);
+  it('Ledger Statement tab: Loan Issue row and the receipt, with grand totals', async () => {
+    await openAccount();
+    await act(async () => { buttonWith('Ledger Statement').click(); });
+    await waitFor(() => text().includes('GRAND TOTALS'), 'statement');
+    const t = text();
+    expect(t).toContain('Loan Issue');
+    expect(t).toContain('RC1');
+    expect(t).toContain('Installment'); // RC1 cleared everything due on 1 Oct
+    expect(t).toContain('90,000'); // outstanding after Loan Issue
   });
 });
